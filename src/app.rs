@@ -115,11 +115,17 @@ pub enum NpuTelemetry {
     Unavailable,
 }
 
-/// NPU clock and power from the APU's `gpu_metrics` table.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// NPU telemetry from the APU's `gpu_metrics` table.
+#[derive(Clone, Debug, PartialEq)]
 pub struct NpuFirmware {
     pub clock_mhz: u16,
     pub power_w: f64,
+    /// Busy percent per NPU column; `u16::MAX` marks an unsupported column.
+    pub columns: Vec<u16>,
+    /// `ipu_reads` / `ipu_writes`. Nominally MB/s, but on Krackan Point the
+    /// NPU's real DRAM reads measured ~4x this value, so treat as relative.
+    pub reads: u16,
+    pub writes: u16,
 }
 
 struct DiscoveredDevices {
@@ -331,6 +337,9 @@ impl App {
         self.npu_firmware = firmware.map(|m| NpuFirmware {
             clock_mhz: m.npuclk_freq,
             power_w: f64::from(m.npu_power) / 1000.0,
+            columns: m.npu_busy,
+            reads: m.npu_reads,
+            writes: m.npu_writes,
         });
         if let Some(busy) = busy {
             self.hist_npu.push(busy);

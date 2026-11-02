@@ -140,7 +140,7 @@ pub(super) fn draw(f: &mut Frame, area: Rect, app: &App) {
             right[1],
         );
     }
-    if let Some(text) = firmware_text(app.npu_firmware) {
+    if let Some(text) = firmware_text(app.npu_firmware.as_ref()) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 format!(" {text}"),
@@ -219,8 +219,33 @@ fn process_npu_text(engine_counter: bool, npu: i64) -> String {
     }
 }
 
-fn firmware_text(firmware: Option<NpuFirmware>) -> Option<String> {
-    firmware.map(|fw| format!("{} MHz  {:.2} W", fw.clock_mhz, fw.power_w))
+fn firmware_text(firmware: Option<&NpuFirmware>) -> Option<String> {
+    firmware.map(|fw| {
+        format!(
+            "{} MHz  {:.2} W  cols {}  ipu R {:.1} W {:.1} (fw ctr)",
+            fw.clock_mhz,
+            fw.power_w,
+            column_glyphs(&fw.columns),
+            f64::from(fw.reads) / 1000.0,
+            f64::from(fw.writes) / 1000.0,
+        )
+    })
+}
+
+/// One block glyph per NPU column, ` ` (idle) to `█` (100%); `·` marks an
+/// unsupported column.
+fn column_glyphs(columns: &[u16]) -> String {
+    const LEVELS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    columns
+        .iter()
+        .map(|&busy| {
+            if busy > 100 {
+                '·'
+            } else {
+                LEVELS[(f64::from(busy) / 100.0 * 8.0).round() as usize]
+            }
+        })
+        .collect()
 }
 
 fn npu_ctx_count(app: &App) -> usize {
@@ -231,7 +256,7 @@ fn npu_ctx_count(app: &App) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{firmware_text, process_npu_text, telemetry_label};
+    use super::{column_glyphs, firmware_text, process_npu_text, telemetry_label};
     use crate::app::{NpuFirmware, NpuTelemetry};
 
     #[test]
@@ -264,12 +289,25 @@ mod tests {
     }
 
     #[test]
-    fn firmware_text_shows_clock_and_power() {
+    fn firmware_text_shows_clock_power_columns_and_traffic_counter() {
         let fw = NpuFirmware {
             clock_mhz: 1802,
             power_w: 1.604,
+            columns: vec![82, 82, 41, 0],
+            reads: 11_046,
+            writes: 912,
         };
-        assert_eq!(firmware_text(Some(fw)).as_deref(), Some("1802 MHz  1.60 W"));
+        assert_eq!(
+            firmware_text(Some(&fw)).as_deref(),
+            Some("1802 MHz  1.60 W  cols ▇▇▃   ipu R 11.0 W 0.9 (fw ctr)")
+        );
         assert_eq!(firmware_text(None), None);
+    }
+
+    #[test]
+    fn column_glyphs_scale_busy_percent_and_mark_unsupported_columns() {
+        assert_eq!(column_glyphs(&[0, 50, 100]), " ▄█");
+        assert_eq!(column_glyphs(&[u16::MAX, 13]), "·▁");
+        assert_eq!(column_glyphs(&[]), "");
     }
 }
