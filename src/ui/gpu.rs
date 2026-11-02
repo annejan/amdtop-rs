@@ -78,7 +78,7 @@ pub(super) fn draw(f: &mut Frame, area: Rect, app: &App) {
 
         let left = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1); 5])
+            .constraints([Constraint::Length(1); 6])
             .split(cols[0]);
 
         // line 0: GPU index + name
@@ -161,6 +161,22 @@ pub(super) fn draw(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(app.theme.bandwidth()),
                 ))),
                 left[4],
+            );
+        }
+
+        // line 5: engaged power/thermal limiters (APU gpu_metrics only)
+        if let Some(text) = crate::throttle::summary(&gpu.throttle.percent) {
+            let engaged = text != "no throttling";
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {text}"),
+                    Style::default().fg(if engaged {
+                        app.theme.temp().sample(0.8)
+                    } else {
+                        app.theme.graph_text()
+                    }),
+                ))),
+                left[5],
             );
         }
 

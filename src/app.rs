@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::time::Duration;
 
+use libamdgpu_top::AMDGPU::MetricsInfo;
 use libamdgpu_top::app::{AppAmdgpuTop, AppOption};
 use libamdgpu_top::{DevicePath, GetNpuMetrics, stat};
 
@@ -14,6 +15,7 @@ use crate::config::CollapseState;
 use crate::cpu::{CpuSampler, SystemMem, cpu_model};
 use crate::history::History;
 use crate::theme::{DEFAULT_THEME, Theme};
+use crate::throttle::{self, ThrottleTracker};
 
 const HISTORY_CAPACITY: usize = 80;
 const PROCESS_INDEX_REFRESH_SECS: u64 = 5;
@@ -35,6 +37,7 @@ pub struct GpuDevice {
     pub app: Option<AppAmdgpuTop>,
     pub hist_gpu: History,
     pub hist_mem: History,
+    pub throttle: ThrottleTracker,
 }
 
 impl GpuDevice {
@@ -44,6 +47,7 @@ impl GpuDevice {
             app,
             hist_gpu: History::new(HISTORY_CAPACITY),
             hist_mem: History::new(HISTORY_CAPACITY),
+            throttle: ThrottleTracker::default(),
         }
     }
 
@@ -184,6 +188,7 @@ impl App {
             if let Some(previous) = previous {
                 refreshed.hist_gpu = previous.hist_gpu;
                 refreshed.hist_mem = previous.hist_mem;
+                refreshed.throttle = previous.throttle;
             }
             refreshed
         })
@@ -243,6 +248,7 @@ impl App {
             device_activated |= gpu.try_activate();
             if let Some(app) = gpu.app.as_mut() {
                 app.update(interval);
+                gpu.throttle.update(throttle_counters(app), interval);
             }
         }
         send_process_targets_after_activation(&self.process_index_sender, device_activated, || {
@@ -589,6 +595,23 @@ fn detect_npu_from_sysfs() -> Option<NpuInfo> {
     }
 
     None
+}
+
+/// Throttle residency accumulators from `gpu_metrics`, in [`throttle::NAMES`]
+/// order; all `None` on devices whose metrics table has no such fields.
+fn throttle_counters(app: &AppAmdgpuTop) -> throttle::Counters {
+    let Some(m) = app.stat.metrics.as_ref() else {
+        return [None; 7];
+    };
+    [
+        m.get_throttle_residency_prochot(),
+        m.get_throttle_residency_spl(),
+        m.get_throttle_residency_fppt(),
+        m.get_throttle_residency_sppt(),
+        m.get_throttle_residency_thm_core(),
+        m.get_throttle_residency_thm_gfx(),
+        m.get_throttle_residency_thm_soc(),
+    ]
 }
 
 fn read_trim(path: impl AsRef<Path>) -> Option<String> {

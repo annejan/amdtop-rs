@@ -15,6 +15,7 @@ mod cpu;
 mod gauge;
 mod history;
 mod theme;
+mod throttle;
 mod ui;
 
 use app::App;
