@@ -68,7 +68,12 @@ fn section_height(app: &App, s: Section) -> Constraint {
             let (_, rows) = cpu::grid_dimensions(app.cpu.per_core_percent.len().max(1));
             4 + rows as u16
         }
-        Section::Gpu => (6 * app.gpus.len() as u16).max(1),
+        Section::Gpu => app
+            .gpus
+            .iter()
+            .map(|gpu| crate::trend::band_height(app.gpu_shows_trends(gpu)))
+            .sum::<u16>()
+            .max(1),
         Section::Npu => {
             let ctx = app
                 .active_apps()

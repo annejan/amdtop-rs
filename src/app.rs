@@ -16,6 +16,7 @@ use crate::cpu::{CpuSampler, SystemMem, cpu_model};
 use crate::history::History;
 use crate::theme::{DEFAULT_THEME, Theme};
 use crate::throttle::{self, ThrottleTracker};
+use crate::trend::Trend;
 
 const HISTORY_CAPACITY: usize = 80;
 const PROCESS_INDEX_REFRESH_SECS: u64 = 5;
@@ -38,6 +39,9 @@ pub struct GpuDevice {
     pub hist_gpu: History,
     pub hist_mem: History,
     pub throttle: ThrottleTracker,
+    pub trend_sclk: Trend,
+    pub trend_temp: Trend,
+    pub trend_power: Trend,
 }
 
 impl GpuDevice {
@@ -48,6 +52,9 @@ impl GpuDevice {
             hist_gpu: History::new(HISTORY_CAPACITY),
             hist_mem: History::new(HISTORY_CAPACITY),
             throttle: ThrottleTracker::default(),
+            trend_sclk: Trend::new(HISTORY_CAPACITY),
+            trend_temp: Trend::new(HISTORY_CAPACITY),
+            trend_power: Trend::new(HISTORY_CAPACITY),
         }
     }
 
@@ -189,6 +196,9 @@ impl App {
                 refreshed.hist_gpu = previous.hist_gpu;
                 refreshed.hist_mem = previous.hist_mem;
                 refreshed.throttle = previous.throttle;
+                refreshed.trend_sclk = previous.trend_sclk;
+                refreshed.trend_temp = previous.trend_temp;
+                refreshed.trend_power = previous.trend_power;
             }
             refreshed
         })
@@ -238,6 +248,14 @@ impl App {
         crate::gauge::block_style(self.block_style).name
     }
 
+    /// Whether this GPU's band includes the sclk/temperature/power trends.
+    pub fn gpu_shows_trends(&self, gpu: &GpuDevice) -> bool {
+        gpu.app
+            .as_ref()
+            .is_some_and(|a| crate::trend::show_trends(a.device_info.is_apu, self.gpus.len()))
+            && !gpu.is_sleeping()
+    }
+
     pub fn active_apps(&self) -> impl Iterator<Item = &AppAmdgpuTop> {
         self.gpus.iter().filter_map(|gpu| gpu.app.as_ref())
     }
@@ -249,6 +267,14 @@ impl App {
             if let Some(app) = gpu.app.as_mut() {
                 app.update(interval);
                 gpu.throttle.update(throttle_counters(app), interval);
+                record_trends(
+                    [
+                        &mut gpu.trend_sclk,
+                        &mut gpu.trend_temp,
+                        &mut gpu.trend_power,
+                    ],
+                    app,
+                );
             }
         }
         send_process_targets_after_activation(&self.process_index_sender, device_activated, || {
@@ -595,6 +621,40 @@ fn detect_npu_from_sysfs() -> Option<NpuInfo> {
     }
 
     None
+}
+
+/// Record sclk against the max engine clock, edge temperature against its
+/// critical limit (else 100 °C), and power against the power cap (else the
+/// session peak; APUs report no cap).
+fn record_trends([sclk, temp, power]: [&mut Trend; 3], app: &AppAmdgpuTop) {
+    let sensors = app.stat.sensors.as_ref();
+    let max_sclk = app.device_info.max_gpu_clk;
+    sclk.record(
+        sensors.and_then(|s| s.sclk).map(f64::from),
+        (max_sclk > 0).then(|| f64::from(max_sclk)),
+    );
+    let edge = sensors.and_then(|s| s.edge_temp.as_ref());
+    temp.record(
+        edge.map(|t| t.current as f64),
+        Some(edge.and_then(|t| t.critical).map_or(100.0, |c| c as f64)),
+    );
+    power.record(
+        sensors
+            .and_then(|s| s.any_hwmon_power())
+            .map(|p| f64::from(p.value)),
+        sensors
+            .and_then(|s| s.power_cap.as_ref())
+            .and_then(|cap| effective_power_cap(cap.current, cap.default))
+            .map(f64::from),
+    );
+}
+
+/// The enforced power limit, falling back to the default when the current
+/// one reads 0.
+pub fn effective_power_cap(current_watts: u32, default_watts: u32) -> Option<u32> {
+    [current_watts, default_watts]
+        .into_iter()
+        .find(|watts| *watts > 0)
 }
 
 /// Throttle residency accumulators from `gpu_metrics`, in [`throttle::NAMES`]

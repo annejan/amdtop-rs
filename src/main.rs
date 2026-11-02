@@ -16,6 +16,7 @@ mod gauge;
 mod history;
 mod theme;
 mod throttle;
+mod trend;
 mod ui;
 
 use app::App;

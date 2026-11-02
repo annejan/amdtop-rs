@@ -5,7 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app::{App, GpuDevice, Section, gpu_mem_info, gpu_memory_pools};
+use crate::app::{App, GpuDevice, Section, effective_power_cap, gpu_mem_info, gpu_memory_pools};
 use crate::gauge::{self, Kind};
 use crate::theme::{SectionBox, UtilKind};
 
@@ -52,14 +52,24 @@ pub(super) fn draw(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    // each GPU = 6-row band
-    let bands = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints((0..app.gpus.len()).map(|_| Constraint::Length(6)))
-        .split(inner);
+    // each GPU = 6-row band, plus a 3-row trend strip where shown
+    let bands =
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(app.gpus.iter().map(|gpu| {
+                Constraint::Length(crate::trend::band_height(app.gpu_shows_trends(gpu)))
+            }))
+            .split(inner);
 
     for (i, gpu) in app.gpus.iter().enumerate() {
-        let band = bands[i];
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(6), Constraint::Min(0)])
+            .split(bands[i]);
+        let band = rows[0];
+        if app.gpu_shows_trends(gpu) {
+            draw_trends(f, rows[1], app, gpu);
+        }
         let sleeping = gpu.is_sleeping();
         if sleeping {
             draw_unavailable_gpu(f, band, app, i, gpu, true);
@@ -273,6 +283,81 @@ pub(super) fn draw(f: &mut Frame, area: Rect, app: &App) {
     }
 }
 
+/// sclk | temperature | power braille graphs with labels, aligned with the
+/// band's right-hand column.
+fn draw_trends(f: &mut Frame, area: Rect, app: &App, gpu: &GpuDevice) {
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(38), Constraint::Min(20)])
+        .split(area);
+    let graphs = Layout::default()
+        .direction(Direction::Horizontal)
+        .spacing(2)
+        .constraints([Constraint::Ratio(1, 3); 3])
+        .split(cols[1]);
+    let max_sclk = gpu
+        .app
+        .as_ref()
+        .map(|a| f64::from(a.device_info.max_gpu_clk))
+        .filter(|m| *m > 0.0);
+    let trends = [
+        (
+            &gpu.trend_sclk,
+            trend_label(
+                "sclk",
+                gpu.trend_sclk.current,
+                "M",
+                max_sclk.map(|m| ("max", m)),
+            ),
+            app.theme.clock(),
+        ),
+        (
+            &gpu.trend_temp,
+            trend_label("temp", gpu.trend_temp.current, "°C", None),
+            app.theme.temp().sample(0.5),
+        ),
+        (
+            &gpu.trend_power,
+            trend_label(
+                "power",
+                gpu.trend_power.current,
+                "W",
+                gpu.trend_power.peak.map(|p| ("peak", p)),
+            ),
+            app.theme.power(),
+        ),
+    ];
+    let gradients = [app.theme.gpu(), app.theme.temp(), app.theme.used()];
+    for (((trend, label, color), grad), col) in trends.into_iter().zip(gradients).zip(graphs.iter())
+    {
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(2), Constraint::Length(1)])
+            .split(*col);
+        render_graph(
+            f,
+            rows[0],
+            trend.hist.braille_graph(col.width as usize, 2, grad),
+        );
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(label, Style::default().fg(color)))),
+            rows[1],
+        );
+    }
+}
+
+/// `name value[unit]  limit_name limit[unit]`, or `name -` without a value.
+fn trend_label(name: &str, current: Option<f64>, unit: &str, limit: Option<(&str, f64)>) -> String {
+    let Some(current) = current else {
+        return format!("{name} -");
+    };
+    let mut text = format!("{name} {current:.0}{unit}");
+    if let Some((limit_name, limit)) = limit {
+        text.push_str(&format!("  {limit_name} {limit:.0}{unit}"));
+    }
+    text
+}
+
 fn draw_unavailable_gpu(
     f: &mut Frame,
     band: Rect,
@@ -419,12 +504,6 @@ fn thermal_metrics(
     metrics
 }
 
-fn effective_power_cap(current_watts: u32, default_watts: u32) -> Option<u32> {
-    [current_watts, default_watts]
-        .into_iter()
-        .find(|watts| *watts > 0)
-}
-
 fn power_text(average_watts: Option<u32>, cap_watts: Option<u32>) -> String {
     match (average_watts, cap_watts) {
         (Some(average), Some(cap)) => format!("{average}/{cap}W"),
@@ -527,9 +606,26 @@ fn short_name(s: &str) -> String {
 mod tests {
     use super::{
         ThermalMetric, effective_power_cap, fmt_bandwidth_rate, fmt_bytes, memory_bandwidth_text,
-        pcie_link_text, power_text, short_name, thermal_metrics, unavailable_detail,
+        pcie_link_text, power_text, short_name, thermal_metrics, trend_label, unavailable_detail,
         unavailable_status,
     };
+
+    #[test]
+    fn trend_labels_show_the_current_value_and_its_scale() {
+        assert_eq!(
+            trend_label("sclk", Some(1565.0), "M", Some(("max", 2900.0))),
+            "sclk 1565M  max 2900M"
+        );
+        assert_eq!(trend_label("temp", Some(53.4), "°C", None), "temp 53°C");
+        assert_eq!(
+            trend_label("power", Some(16.0), "W", Some(("peak", 19.0))),
+            "power 16W  peak 19W"
+        );
+        assert_eq!(
+            trend_label("sclk", None, "M", Some(("max", 2900.0))),
+            "sclk -"
+        );
+    }
 
     #[test]
     fn maximum_pcie_link_uses_compact_identity_text() {
