@@ -5,7 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
-use crate::app::{App, GpuDevice, Section, gpu_mem_info};
+use crate::app::{App, GpuDevice, Section, gpu_mem_info, gpu_memory_pools};
 use crate::gauge::{self, Kind};
 use crate::theme::{SectionBox, UtilKind};
 
@@ -193,7 +193,6 @@ pub(super) fn draw(f: &mut Frame, area: Rect, app: &App) {
             .split(cols[1]);
 
         let gfx = f64::from(a.stat.activity.gfx.unwrap_or(0));
-        let memory = gpu_mem_info(a);
         let rw = cols[1].width as usize;
 
         f.render_widget(
@@ -203,19 +202,33 @@ pub(super) fn draw(f: &mut Frame, area: Rect, app: &App) {
             )),
             right[0],
         );
-        let mem_val = format!(
-            "{} / {}",
-            fmt_bytes(memory.used_bytes),
-            fmt_bytes(memory.total_bytes)
-        );
-        f.render_widget(
-            Paragraph::new(render_bar(
-                app,
-                gauge::Bar::new("MEM", Some(memory.percent), rw, Kind::Mem)
-                    .with_value(&mem_val, GPU_VALUE_WIDTH),
-            )),
-            right[1],
-        );
+        // One MEM gauge for discrete GPUs; VRAM carve-out and GTT side by
+        // side for APUs.
+        let pools = gpu_memory_pools(a);
+        let pool_areas = Layout::default()
+            .direction(Direction::Horizontal)
+            .spacing(2)
+            .constraints(
+                pools
+                    .iter()
+                    .map(|_| Constraint::Ratio(1, pools.len() as u32)),
+            )
+            .split(right[1]);
+        for ((label, pool), area) in pools.iter().zip(pool_areas.iter()) {
+            let value = format!(
+                "{} / {}",
+                fmt_bytes(pool.used_bytes),
+                fmt_bytes(pool.total_bytes)
+            );
+            f.render_widget(
+                Paragraph::new(render_bar(
+                    app,
+                    gauge::Bar::new(label, Some(pool.percent), area.width as usize, Kind::Mem)
+                        .with_value(&value, GPU_VALUE_WIDTH),
+                )),
+                *area,
+            );
+        }
 
         // graphs side by side
         let gcols = Layout::default()
@@ -249,9 +262,10 @@ pub(super) fn draw(f: &mut Frame, area: Rect, app: &App) {
             ))),
             lcols[0],
         );
+        // The history follows the primary pool: GTT on APUs, VRAM otherwise.
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                "MEM",
+                if a.device_info.is_apu { "GTT" } else { "MEM" },
                 Style::default().fg(app.theme.used().sample(0.6)),
             ))),
             lcols[1],

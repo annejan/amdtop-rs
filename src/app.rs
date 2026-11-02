@@ -705,6 +705,29 @@ pub fn gpu_mem_info(app: &AppAmdgpuTop) -> MemInfo {
     )
 }
 
+/// Memory pools to show per device. APUs have a dedicated VRAM carve-out plus
+/// GTT (system RAM mapped for the GPU), and either can be the one filling up,
+/// so both are shown; discrete GPUs show VRAM.
+pub fn gpu_memory_pools(app: &AppAmdgpuTop) -> Vec<(&'static str, MemInfo)> {
+    let usage = &app.stat.vram_usage.0;
+    memory_pools(
+        app.device_info.is_apu,
+        (usage.vram.heap_usage, usage.vram.usable_heap_size),
+        (usage.gtt.heap_usage, usage.gtt.usable_heap_size),
+    )
+}
+
+fn memory_pools(is_apu: bool, vram: (u64, u64), gtt: (u64, u64)) -> Vec<(&'static str, MemInfo)> {
+    if is_apu {
+        vec![
+            ("VRAM", memory_info(false, vram, gtt)),
+            ("GTT", memory_info(true, vram, gtt)),
+        ]
+    } else {
+        vec![("MEM", memory_info(false, vram, gtt))]
+    }
+}
+
 fn memory_info(is_apu: bool, vram: (u64, u64), gtt: (u64, u64)) -> MemInfo {
     let (used_bytes, total_bytes) = if is_apu { gtt } else { vram };
     let percent = if total_bytes == 0 {
@@ -724,8 +747,8 @@ mod tests {
     use std::sync::mpsc::{self, TryRecvError};
 
     use super::{
-        FdinfoProbe, NpuInfo, NpuTelemetry, activate_if_awake, memory_info, npu_busy, pair_by_key,
-        parse_fdinfo_probe, parse_process_rss_kb, same_npu_device,
+        FdinfoProbe, NpuInfo, NpuTelemetry, activate_if_awake, memory_info, memory_pools, npu_busy,
+        pair_by_key, parse_fdinfo_probe, parse_process_rss_kb, same_npu_device,
         send_process_targets_after_activation,
     };
 
@@ -925,6 +948,22 @@ mod tests {
             (discrete.used_bytes, discrete.total_bytes, discrete.percent),
             (10, 100, 10.0)
         );
+    }
+
+    #[test]
+    fn apus_show_the_vram_carve_out_and_gtt_discrete_gpus_show_vram() {
+        let apu = memory_pools(true, (2 << 30, 4 << 30), (221 << 20, 14 << 30));
+        assert_eq!(
+            apu.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            ["VRAM", "GTT"]
+        );
+        assert_eq!(apu[0].1.percent, 50.0);
+        assert_eq!(apu[1].1.used_bytes, 221 << 20);
+
+        let discrete = memory_pools(false, (10, 100), (20, 200));
+        assert_eq!(discrete.len(), 1);
+        assert_eq!(discrete[0].0, "MEM");
+        assert_eq!(discrete[0].1.total_bytes, 100);
     }
 
     #[test]
