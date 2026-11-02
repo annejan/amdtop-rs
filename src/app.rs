@@ -18,7 +18,10 @@ use crate::theme::{DEFAULT_THEME, Theme};
 use crate::throttle::{self, ThrottleTracker};
 use crate::trend::Trend;
 
-const HISTORY_CAPACITY: usize = 80;
+/// Samples kept per history (1 Hz). Each braille cell shows two samples, so
+/// this fills a ~1000-cell graph, a full-width graph on a 4K terminal: about
+/// 33 minutes of history at roughly 16 KiB per history.
+const HISTORY_CAPACITY: usize = 2000;
 const PROCESS_INDEX_REFRESH_SECS: u64 = 5;
 
 #[derive(PartialEq, Eq, Copy, Clone)]
@@ -822,11 +825,30 @@ fn memory_info(is_apu: bool, vram: (u64, u64), gtt: (u64, u64)) -> MemInfo {
 mod tests {
     use std::sync::mpsc::{self, TryRecvError};
 
+    use crate::history::History;
+    use crate::theme::Gradient;
+
     use super::{
-        FdinfoProbe, NpuInfo, NpuTelemetry, activate_if_awake, memory_info, memory_pools, npu_busy,
-        pair_by_key, parse_fdinfo_probe, parse_process_rss_kb, same_npu_device,
-        send_process_targets_after_activation,
+        FdinfoProbe, HISTORY_CAPACITY, NpuInfo, NpuTelemetry, activate_if_awake, memory_info,
+        memory_pools, npu_busy, pair_by_key, parse_fdinfo_probe, parse_process_rss_kb,
+        same_npu_device, send_process_targets_after_activation,
     };
+
+    #[test]
+    fn history_fills_a_graph_as_wide_as_a_4k_terminal() {
+        // A full-width graph on a 4K screen is ~1000 braille cells, i.e. 2000
+        // samples. With too small a capacity only the right edge ever fills.
+        let cells = 1000;
+        let mut history = History::new(HISTORY_CAPACITY);
+        for _ in 0..2 * cells {
+            history.push(100);
+        }
+        let white = ratatui::style::Color::White;
+        let gradient = Gradient::three(white, white, white);
+        let graph = history.braille_graph(cells, 1, &gradient);
+        let leftmost = graph[0].spans.first().expect("graph has cells");
+        assert_eq!(leftmost.content, "⣿", "leftmost cell should hold data");
+    }
 
     #[test]
     fn fdinfo_probe_detects_driver_and_engine_counter_separately() {
